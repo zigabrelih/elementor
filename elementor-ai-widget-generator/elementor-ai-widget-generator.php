@@ -32,6 +32,24 @@ final class Elementor_AI_Widget_Generator {
 		// Admin Settings
 		add_action( 'admin_menu', [ $this, 'add_admin_menu' ] );
 		add_action( 'admin_init', [ $this, 'register_settings' ] );
+
+		// Register CPT
+		add_action( 'init', [ $this, 'register_cpt' ] );
+
+		// New AJAX handlers for Chat/History
+		add_action( 'wp_ajax_elementor_ai_get_widgets', [ $this, 'ajax_get_widgets' ] );
+		add_action( 'wp_ajax_elementor_ai_chat_submit', [ $this, 'ajax_chat_submit' ] );
+		add_action( 'wp_ajax_elementor_ai_load_history', [ $this, 'ajax_load_history' ] );
+	}
+
+	public function register_cpt() {
+		register_post_type( 'e_ai_widget', [
+			'public' => false,
+			'label' => 'AI Widgets',
+			'supports' => [ 'title', 'custom-fields' ],
+			'show_ui' => true,
+			'show_in_menu' => false,
+		] );
 	}
 
 	public function add_admin_menu() {
@@ -163,59 +181,150 @@ final class Elementor_AI_Widget_Generator {
 		}
 	}
 
-	public function ajax_generate_widget() {
+	public function ajax_get_widgets() {
 		check_ajax_referer( 'elementor_ai_widget_generator_nonce', 'security' );
+		if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Denied' );
 
-		if ( ! current_user_can( 'manage_options' ) ) {
-			wp_send_json_error( 'Permission denied' );
+		$args = [
+			'post_type' => 'e_ai_widget',
+			'posts_per_page' => -1,
+			'post_status' => 'any'
+		];
+		$query = new WP_Query( $args );
+		$widgets = [];
+		foreach ( $query->posts as $post ) {
+			$widgets[] = [
+				'id' => $post->ID,
+				'title' => $post->post_title,
+				'date' => $post->post_date,
+			];
 		}
+		wp_send_json_success( $widgets );
+	}
+
+	public function ajax_load_history() {
+		check_ajax_referer( 'elementor_ai_widget_generator_nonce', 'security' );
+		if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Denied' );
+
+		$post_id = intval( $_POST['post_id'] );
+		$history = get_post_meta( $post_id, '_ai_widget_history', true );
+		if ( ! is_array( $history ) ) $history = [];
+
+		wp_send_json_success( $history );
+	}
+
+	public function ajax_chat_submit() {
+		check_ajax_referer( 'elementor_ai_widget_generator_nonce', 'security' );
+		if ( ! current_user_can( 'manage_options' ) ) wp_send_json_error( 'Denied' );
 
 		$api_key = get_option( 'elementor_ai_api_key' );
-		if ( empty( $api_key ) ) {
-			wp_send_json_error( 'API Key is missing. Please configure it in Settings.' );
-		}
+		if ( empty( $api_key ) ) wp_send_json_error( 'API Key Missing' );
 
 		$prompt = sanitize_text_field( $_POST['prompt'] );
-		$widget_id = uniqid();
-		$class_name = 'Elementor_AI_Widget_' . $widget_id;
-		$file_path = $this->widgets_dir . '/' . $class_name . '.php';
+		$post_id = isset( $_POST['post_id'] ) ? intval( $_POST['post_id'] ) : 0;
+		$history = [];
+		$current_code = '';
 
-		// Get code from LLM
-		$widget_code = $this->get_llm_generated_code( $prompt, $class_name );
-
-		if ( empty( $widget_code ) ) {
-			wp_send_json_error( 'Failed to generate code from API.' );
+		if ( $post_id ) {
+			$history = get_post_meta( $post_id, '_ai_widget_history', true );
+			if ( ! is_array( $history ) ) $history = [];
+			$current_code = get_post_meta( $post_id, '_ai_widget_code', true );
+			// Also need class name
+			$class_name = get_post_meta( $post_id, '_ai_widget_class', true );
+			if ( ! $class_name ) {
+				// Fallback if missing
+				$class_name = 'Elementor_AI_Widget_' . uniqid();
+			}
+		} else {
+			// New Widget
+			$class_name = 'Elementor_AI_Widget_' . uniqid();
+			// Create Post
+			$post_id = wp_insert_post( [
+				'post_title' => $prompt, // Use first prompt as title initially
+				'post_type' => 'e_ai_widget',
+				'post_status' => 'publish'
+			] );
+			update_post_meta( $post_id, '_ai_widget_class', $class_name );
 		}
 
-		// Sandbox: Test if code is valid
-		if ( $this->is_valid_code( $widget_code, $class_name ) ) {
-			file_put_contents( $file_path, $widget_code );
-			wp_send_json_success( [ 'message' => 'Widget generated successfully!' ] );
+		// Prepare LLM Context
+		$messages = $this->prepare_llm_messages( $prompt, $history, $current_code, $class_name );
+
+		// Call API
+		$response_content = $this->call_openrouter_api( $messages, $api_key );
+		if ( ! $response_content ) wp_send_json_error( 'API Error' );
+
+		// Extract Code
+		$new_code = $this->extract_code( $response_content );
+
+		if ( empty( $new_code ) ) {
+			// It might be just a chat message without code?
+			// For now, we assume we always want code updates.
+			// If no code block found, maybe just save the message.
+			// But the goal is to generate widgets.
+			// Let's assume failure if no code for now, or improve regex.
+			wp_send_json_error( 'No code found in response.' );
+		}
+
+		// Validate
+		if ( $this->is_valid_code( $new_code, $class_name ) ) {
+			// Save to File
+			$file_path = $this->widgets_dir . '/' . $class_name . '.php';
+			file_put_contents( $file_path, $new_code );
+
+			// Update Meta
+			update_post_meta( $post_id, '_ai_widget_code', $new_code );
+
+			// Update History
+			$history[] = [ 'role' => 'user', 'content' => $prompt ];
+			$history[] = [ 'role' => 'assistant', 'content' => 'Code updated successfully.' ]; // We don't save full code in history to save tokens, we save it in meta
+			update_post_meta( $post_id, '_ai_widget_history', $history );
+
+			wp_send_json_success( [
+				'post_id' => $post_id,
+				'history' => $history,
+				'message' => 'Widget updated!'
+			] );
 		} else {
-			wp_send_json_error( 'Generated code failed validation/syntax check.' );
+			wp_send_json_error( 'Generated code failed validation.' );
 		}
 	}
 
-	private function get_llm_generated_code( $user_prompt, $class_name ) {
-		$model = get_option( 'elementor_ai_model', 'x-ai/grok-code-fast-1' );
-		$api_key = get_option( 'elementor_ai_api_key' );
-
-		// Instructions for LLM
+	private function prepare_llm_messages( $user_prompt, $history, $current_code, $class_name ) {
 		$system_prompt = "You are an expert Elementor Widget developer.
-		Create a complete PHP class for a new Elementor Widget.
 
-		Requirements:
-		1. Class name MUST be: $class_name
-		2. Extend \Elementor\Widget_Base
-		3. Implement get_name(), get_title(), get_icon(), get_categories()
-		4. Implement register_controls() with useful controls based on user request.
-		5. Implement render() to output HTML.
-		6. Output ONLY the PHP code. Do not include markdown code blocks (```php) if possible, or ensure they can be stripped.
-		7. Start the file with the opening <?php tag.
-		8. Ensure code is secure and follows WP standards.
+		Task:
+		- Maintain the PHP class: $class_name
+		- Extend \Elementor\Widget_Base
+		- Output ONLY valid PHP code for the entire class.
+		- Do not use markdown blocks. Start with <?php.
 
-		User Request: $user_prompt
+		Context:
+		- If code exists, you must modify it based on the user request.
+		- If this is a new request, create the class from scratch.
+
+		Current Code:
+		$current_code
 		";
+
+		// We construct messages.
+		// To save tokens, we might not send full history if it's long, but here we send it.
+		// However, we stored 'Code updated' in history, which is not useful for the LLM.
+		// The LLM needs the User prompts.
+		// Better strategy:
+		// 1. System Prompt (includes Current Code).
+		// 2. New User Prompt.
+		// We ignore old user prompts because 'Current Code' represents the sum of all previous prompts.
+		// This is a 'State + Update' model rather than 'Chat History' model.
+
+		return [
+			[ 'role' => 'system', 'content' => $system_prompt ],
+			[ 'role' => 'user', 'content' => $user_prompt ]
+		];
+	}
+
+	private function call_openrouter_api( $messages, $api_key ) {
+		$model = get_option( 'elementor_ai_model', 'x-ai/grok-code-fast-1' );
 
 		$response = wp_remote_post( 'https://openrouter.ai/api/v1/chat/completions', [
 			'headers' => [
@@ -226,38 +335,23 @@ final class Elementor_AI_Widget_Generator {
 			],
 			'body' => json_encode( [
 				'model' => $model,
-				'messages' => [
-					[
-						'role' => 'system',
-						'content' => $system_prompt,
-					],
-					[
-						'role' => 'user',
-						'content' => $user_prompt,
-					],
-				],
+				'messages' => $messages,
 			] ),
 			'timeout' => 60,
 		] );
 
-		if ( is_wp_error( $response ) ) {
-			error_log( 'OpenRouter API Error: ' . $response->get_error_message() );
-			return '';
-		}
+		if ( is_wp_error( $response ) ) return false;
 
 		$body = wp_remote_retrieve_body( $response );
 		$data = json_decode( $body, true );
 
-		if ( isset( $data['choices'][0]['message']['content'] ) ) {
-			$content = $data['choices'][0]['message']['content'];
-			// Clean up code (strip markdown blocks if present)
-			$content = preg_replace( '/^```php/m', '', $content );
-			$content = preg_replace( '/^```/m', '', $content );
-			return trim( $content );
-		} else {
-			error_log( 'OpenRouter API Invalid Response: ' . $body );
-			return '';
-		}
+		return $data['choices'][0]['message']['content'] ?? false;
+	}
+
+	private function extract_code( $content ) {
+		$content = preg_replace( '/^```php/m', '', $content );
+		$content = preg_replace( '/^```/m', '', $content );
+		return trim( $content );
 	}
 
 	private function is_valid_code( $code, $class_name ) {
