@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Elementor AI Widget Generator
- * Description: An extension for Elementor to generate widgets using AI.
- * Version: 1.0.0
+ * Description: An extension for Elementor to generate widgets using AI (OpenRouter).
+ * Version: 1.1.0
  * Author: Jules
  */
 
@@ -12,8 +12,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 final class Elementor_AI_Widget_Generator {
 
-	const VERSION = '1.0.0';
+	const VERSION = '1.1.0';
 	private $widgets_dir;
+	private $option_group = 'elementor_ai_widget_generator_settings';
 
 	public function __construct() {
 		$this->widgets_dir = wp_upload_dir()['basedir'] . '/elementor-ai-widgets';
@@ -27,6 +28,95 @@ final class Elementor_AI_Widget_Generator {
 
 		// Load generated widgets
 		add_action( 'elementor/widgets/register', [ $this, 'register_generated_widgets' ] );
+
+		// Admin Settings
+		add_action( 'admin_menu', [ $this, 'add_admin_menu' ] );
+		add_action( 'admin_init', [ $this, 'register_settings' ] );
+	}
+
+	public function add_admin_menu() {
+		add_options_page(
+			'Elementor AI Widget Generator',
+			'AI Widget Generator',
+			'manage_options',
+			'elementor-ai-widget-generator',
+			[ $this, 'render_settings_page' ]
+		);
+	}
+
+	public function register_settings() {
+		register_setting( $this->option_group, 'elementor_ai_api_key' );
+		register_setting( $this->option_group, 'elementor_ai_model' );
+
+		add_settings_section(
+			'elementor_ai_main_section',
+			'API Configuration',
+			null,
+			'elementor-ai-widget-generator'
+		);
+
+		add_settings_field(
+			'elementor_ai_api_key',
+			'OpenRouter API Key',
+			[ $this, 'render_api_key_field' ],
+			'elementor-ai-widget-generator',
+			'elementor_ai_main_section'
+		);
+
+		add_settings_field(
+			'elementor_ai_model',
+			'AI Model',
+			[ $this, 'render_model_field' ],
+			'elementor-ai-widget-generator',
+			'elementor_ai_main_section'
+		);
+	}
+
+	public function render_settings_page() {
+		?>
+		<div class="wrap">
+			<h1>Elementor AI Widget Generator Settings</h1>
+			<form method="post" action="options.php">
+				<?php
+				settings_fields( $this->option_group );
+				do_settings_sections( 'elementor-ai-widget-generator' );
+				submit_button();
+				?>
+			</form>
+		</div>
+		<?php
+	}
+
+	public function render_api_key_field() {
+		$api_key = get_option( 'elementor_ai_api_key' );
+		?>
+		<input type="password" name="elementor_ai_api_key" value="<?php echo esc_attr( $api_key ); ?>" class="regular-text" />
+		<p class="description">Enter your OpenRouter API Key.</p>
+		<?php
+	}
+
+	public function render_model_field() {
+		$selected_model = get_option( 'elementor_ai_model', 'x-ai/grok-code-fast-1' );
+		$models = [
+			'x-ai/grok-code-fast-1' => 'Grok Code Fast 1',
+			'anthropic/claude-opus-4.5' => 'Claude Opus 4.5',
+			'mistralai/devstral-2512:free' => 'Devstral 2512 (Free)',
+			'anthropic/claude-sonnet-4.5' => 'Claude Sonnet 4.5',
+			'minimax/minimax-m2' => 'Minimax M2',
+			'google/gemini-3-flash-preview' => 'Gemini 3 Flash Preview',
+			'openai/gpt-5.2' => 'GPT 5.2',
+			'kwaipilot/kat-coder-pro:free' => 'Kat Coder Pro (Free)',
+			'xiaomi/mimo-v2-flash-20251210' => 'Mimo V2 Flash 20251210'
+		];
+		?>
+		<select name="elementor_ai_model">
+			<?php foreach ( $models as $value => $label ) : ?>
+				<option value="<?php echo esc_attr( $value ); ?>" <?php selected( $selected_model, $value ); ?>>
+					<?php echo esc_html( $label ); ?>
+				</option>
+			<?php endforeach; ?>
+		</select>
+		<?php
 	}
 
 	public function enqueue_editor_scripts() {
@@ -59,11 +149,6 @@ final class Elementor_AI_Widget_Generator {
 		foreach ( glob( $this->widgets_dir . '/*.php' ) as $file ) {
 			try {
 				include_once $file;
-				// Extract class name from file content or convention
-				// For simplicity, we assume the class name matches the filename with some conversion
-				// Or we rely on the file declaring a class and we find declared classes?
-				// Better: We define a standard way to find the class.
-				// Let's assume the file returns the class name or instance? No, standard is class declaration.
 
 				$content = file_get_contents( $file );
 				if ( preg_match( '/class\s+(\w+)\s+extends/', $content, $matches ) ) {
@@ -73,8 +158,6 @@ final class Elementor_AI_Widget_Generator {
 					}
 				}
 			} catch ( \Throwable $e ) {
-				// Log error, maybe delete file if it causes persistent issues?
-				// For now, just ignore failed widgets so they don't crash editor
 				error_log( 'Failed to load widget: ' . $file . ' - ' . $e->getMessage() );
 			}
 		}
@@ -87,6 +170,11 @@ final class Elementor_AI_Widget_Generator {
 			wp_send_json_error( 'Permission denied' );
 		}
 
+		$api_key = get_option( 'elementor_ai_api_key' );
+		if ( empty( $api_key ) ) {
+			wp_send_json_error( 'API Key is missing. Please configure it in Settings.' );
+		}
+
 		$prompt = sanitize_text_field( $_POST['prompt'] );
 		$widget_id = uniqid();
 		$class_name = 'Elementor_AI_Widget_' . $widget_id;
@@ -96,7 +184,7 @@ final class Elementor_AI_Widget_Generator {
 		$widget_code = $this->get_llm_generated_code( $prompt, $class_name );
 
 		if ( empty( $widget_code ) ) {
-			wp_send_json_error( 'Failed to generate code.' );
+			wp_send_json_error( 'Failed to generate code from API.' );
 		}
 
 		// Sandbox: Test if code is valid
@@ -109,6 +197,9 @@ final class Elementor_AI_Widget_Generator {
 	}
 
 	private function get_llm_generated_code( $user_prompt, $class_name ) {
+		$model = get_option( 'elementor_ai_model', 'x-ai/grok-code-fast-1' );
+		$api_key = get_option( 'elementor_ai_api_key' );
+
 		// Instructions for LLM
 		$system_prompt = "You are an expert Elementor Widget developer.
 		Create a complete PHP class for a new Elementor Widget.
@@ -119,95 +210,54 @@ final class Elementor_AI_Widget_Generator {
 		3. Implement get_name(), get_title(), get_icon(), get_categories()
 		4. Implement register_controls() with useful controls based on user request.
 		5. Implement render() to output HTML.
-		6. Start the file with the opening <?php tag.
-		7. Ensure code is secure and follows WP standards.
+		6. Output ONLY the PHP code. Do not include markdown code blocks (```php) if possible, or ensure they can be stripped.
+		7. Start the file with the opening <?php tag.
+		8. Ensure code is secure and follows WP standards.
 
 		User Request: $user_prompt
 		";
 
-		// MOCK LLM CALL
-		// In a real scenario, this would call OpenAI or similar.
-		// For this demo, we use a robust template and inject the user request slightly.
-
-		return $this->mock_llm_logic( $class_name, $user_prompt );
-	}
-
-	private function mock_llm_logic( $class_name, $user_prompt ) {
-		// A simple template that changes based on keywords in prompt
-		$title = 'AI Widget';
-		if ( strpos( $user_prompt, 'header' ) !== false ) $title = 'AI Header';
-		if ( strpos( $user_prompt, 'button' ) !== false ) $title = 'AI Button';
-
-		$render_content = "<h3>$title</h3><p>" . esc_html( $user_prompt ) . "</p>";
-
-		// If user asks for color control
-		$color_control = "";
-		if ( strpos( $user_prompt, 'color' ) !== false ) {
-			$color_control = "
-		\$this->add_control(
-			'color',
-			[
-				'label' => esc_html__( 'Color', 'elementor-ai-widget-generator' ),
-				'type' => \Elementor\Controls_Manager::COLOR,
-				'selectors' => [
-					'{{WRAPPER}} h3' => 'color: {{VALUE}}',
+		$response = wp_remote_post( 'https://openrouter.ai/api/v1/chat/completions', [
+			'headers' => [
+				'Authorization' => 'Bearer ' . $api_key,
+				'Content-Type'  => 'application/json',
+				'HTTP-Referer'  => site_url(),
+				'X-Title'       => 'Elementor AI Widget Generator',
+			],
+			'body' => json_encode( [
+				'model' => $model,
+				'messages' => [
+					[
+						'role' => 'system',
+						'content' => $system_prompt,
+					],
+					[
+						'role' => 'user',
+						'content' => $user_prompt,
+					],
 				],
-			]
-		);";
+			] ),
+			'timeout' => 60,
+		] );
+
+		if ( is_wp_error( $response ) ) {
+			error_log( 'OpenRouter API Error: ' . $response->get_error_message() );
+			return '';
 		}
 
-		return "<?php
-class $class_name extends \Elementor\Widget_Base {
+		$body = wp_remote_retrieve_body( $response );
+		$data = json_decode( $body, true );
 
-	public function get_name() {
-		return '" . strtolower( $class_name ) . "';
-	}
-
-	public function get_title() {
-		return esc_html__( '$title', 'elementor-ai-widget-generator' );
-	}
-
-	public function get_icon() {
-		return 'eicon-code';
-	}
-
-	public function get_categories() {
-		return [ 'general' ];
-	}
-
-	protected function register_controls() {
-		\$this->start_controls_section(
-			'content_section',
-			[
-				'label' => esc_html__( 'Content', 'elementor-ai-widget-generator' ),
-				'tab' => \Elementor\Controls_Manager::TAB_CONTENT,
-			]
-		);
-
-		\$this->add_control(
-			'title_text',
-			[
-				'label' => esc_html__( 'Title Text', 'elementor-ai-widget-generator' ),
-				'type' => \Elementor\Controls_Manager::TEXT,
-				'default' => esc_html__( '$title', 'elementor-ai-widget-generator' ),
-			]
-		);
-		$color_control
-
-		\$this->end_controls_section();
-	}
-
-	protected function render() {
-		\$settings = \$this->get_settings_for_display();
-		?>
-		<div class=\"ai-widget-content\">
-			<h3><?php echo esc_html( \$settings['title_text'] ); ?></h3>
-			<p>Original Prompt: " . esc_html( $user_prompt ) . "</p>
-		</div>
-		<?php
-	}
-}
-";
+		if ( isset( $data['choices'][0]['message']['content'] ) ) {
+			$content = $data['choices'][0]['message']['content'];
+			// Clean up code (strip markdown blocks if present)
+			$content = preg_replace( '/^```php/m', '', $content );
+			$content = preg_replace( '/^```/m', '', $content );
+			return trim( $content );
+		} else {
+			error_log( 'OpenRouter API Invalid Response: ' . $body );
+			return '';
+		}
 	}
 
 	private function is_valid_code( $code, $class_name ) {
@@ -219,9 +269,6 @@ class $class_name extends \Elementor\Widget_Base {
 		file_put_contents( $temp_file, $code );
 
 		try {
-			// Check syntax lint if possible (requires exec)
-			// $output = shell_exec("php -l $temp_file");
-
 			// Fallback: Try to include it.
 			// Since we wrapped it in a class, including it shouldn't execute side effects immediately
 			// except defining the class.
