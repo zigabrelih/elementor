@@ -2,7 +2,8 @@
 	"core": null,
 	"phpVersion": "8.0",
 	"plugins": [
-		"./build"
+		"./build",
+		"./elementor-ai-widget-generator"
 	],
 	"themes": [
 		"https://downloads.wordpress.org/theme/hello-elementor.zip"
