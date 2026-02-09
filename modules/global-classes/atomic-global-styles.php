@@ -37,10 +37,30 @@ class Atomic_Global_Styles {
 		$context = is_preview() ? Global_Classes_Repository::CONTEXT_PREVIEW : Global_Classes_Repository::CONTEXT_FRONTEND;
 
 		$get_styles = function () use ( $context ) {
-			return Global_Classes_Repository::make()->context( $context )->all()->get_items()->map( function( $item ) {
+			$classes = Global_Classes_Repository::make()->context( $context )->all();
+			$items = $classes->get_items();
+			$order = $classes->get_order();
+
+			if ( $order->is_empty() ) {
+				return $items->map( function( $item ) {
+					$item['id'] = $item['label'];
+					return $item;
+				} )->all();
+			}
+
+			return $order->map( function( $id ) use ( $items ) {
+				$item = $items->get( $id );
+
+				if ( ! $item ) {
+					return null;
+				}
+
 				$item['id'] = $item['label'];
+
 				return $item;
-			})->all();
+			} )
+			->filter()
+			->values(); // Ensure the result is an indexed array
 		};
 
 		$styles_manager->register(
